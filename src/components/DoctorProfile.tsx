@@ -6,7 +6,7 @@ import { Label } from './ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Textarea } from './ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { UserCircle, Building2, MapPin, FileText, Stethoscope, Phone, Mail, Download, RefreshCw, History, Clock, Calendar, Upload as CloudUpload, FileUp } from 'lucide-react';
+import { UserCircle, Building2, MapPin, FileText, Stethoscope, Phone, Mail, Download, RefreshCw, History, Clock, Calendar, Upload as CloudUpload } from 'lucide-react';
 import { toast } from 'sonner';
 import { forceBackup, getAllBackups, loadBackupByKey, BackupInfo } from '../utils/db';
 import { listCloudBackups, restoreFromCloudBackup, CloudBackupInfo, isSignedIn, createCloudBackup } from '../utils/googleDrive';
@@ -555,7 +555,7 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
               variant="outline"
               onClick={handleImportClick}
             >
-              <FileUp className="w-4 h-4 mr-2" />
+              <CloudUpload className="w-4 h-4 mr-2" />
               Impor Backup
             </Button>
           </div>
