@@ -7,7 +7,7 @@ import { estimateAppDataSize, formatBytes } from '../utils/storageQuota';
 import {
     initGoogleDrive,
     isGoogleApisLoaded,
-    signInWithGoogle,
+    requestAccessTokenInteractive,
     signOutFromGoogle,
     smartCloudBackup,
     isSignedIn,
@@ -164,31 +164,37 @@ export function StorageIndicator({ appData, onLoadFromCloud }: StorageIndicatorP
     }, [appData, autoSyncEnabled, isGoogleSignedIn]);
 
     const handleGoogleSignIn = async () => {
+        // CRITICAL: trigger the consent popup synchronously from the click
+        // (no await/init/setTimeout before this) so the browser allows it.
+        const tokenPromise = requestAccessTokenInteractive();
         setIsConnecting(true);
         try {
-            const success = await signInWithGoogle();
-            if (success) {
-                setIsGoogleSignedIn(true);
-                const email = await getUserEmail();
-                setGoogleEmail(email);
-                setAutoSyncEnabled(true);
+            const success = await tokenPromise;
+            if (!success) {
+                toast.error('Gagal masuk ke Google Drive. Coba lagi.');
+                return;
+            }
 
-                // Automatically merge local and cloud data (no dialog)
-                const mergeResult = await smartMergeAndSync(appData);
-                if (mergeResult && onLoadFromCloud) {
-                    onLoadFromCloud(mergeResult.merged as AppData);
+            setIsGoogleSignedIn(true);
+            const email = await getUserEmail();
+            setGoogleEmail(email);
+            setAutoSyncEnabled(true);
 
-                    if (mergeResult.newItemsCount > 0) {
-                        toast.success(`Terhubung sebagai ${email} • ${mergeResult.newItemsCount} item lokal digabung`);
-                    } else {
-                        toast.success(`Terhubung ke Google Drive sebagai ${email}`);
-                    }
+            // Automatically merge local and cloud data (no dialog)
+            const mergeResult = await smartMergeAndSync(appData);
+            if (mergeResult && onLoadFromCloud) {
+                onLoadFromCloud(mergeResult.merged as AppData);
+
+                if (mergeResult.newItemsCount > 0) {
+                    toast.success(`Terhubung sebagai ${email} • ${mergeResult.newItemsCount} item lokal digabung`);
                 } else {
-                    // No cloud data yet, just upload local
-                    await saveToGoogleDrive(appData);
-                    setLastSyncTime(new Date());
                     toast.success(`Terhubung ke Google Drive sebagai ${email}`);
                 }
+            } else {
+                // No cloud data yet, just upload local
+                await saveToGoogleDrive(appData);
+                setLastSyncTime(new Date());
+                toast.success(`Terhubung ke Google Drive sebagai ${email}`);
             }
         } catch (error) {
             console.error('Google sign in failed:', error);

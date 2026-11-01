@@ -96,23 +96,30 @@ export async function initGoogleDrive(): Promise<boolean> {
 }
 
 /**
- * Sign in with Google
+ * Interactive sign-in: open the Google consent popup.
+ *
+ * CRITICAL: this MUST be called synchronously from a user click handler so the
+ * browser treats it as user-activated and allows the popup (especially in a
+ * standalone/installed PWA window). It assumes `tokenClient` is already
+ * initialized (both components only render the sign-in button after
+ * `initGoogleDrive()` resolves). It never calls `initGoogleDrive()` itself and
+ * performs NO `await`/`setTimeout`/`localStorage` read before
+ * `requestAccessToken()` on the needs-token path.
  */
-export function signInWithGoogle(): Promise<boolean> {
-    return new Promise((resolve) => {
-        if (!tokenClient) {
-            console.error('Token client not initialized');
-            resolve(false);
-            return;
-        }
+export function requestAccessTokenInteractive(): Promise<boolean> {
+    if (!tokenClient) {
+        console.error('Token client not initialized');
+        return Promise.resolve(false);
+    }
 
+    return new Promise((resolve) => {
         // Timeout to prevent hanging if user closes popup (2 minutes)
         const timeoutId = setTimeout(() => {
             console.warn('Google sign-in timed out');
             resolve(false);
         }, 120000);
 
-        tokenClient.callback = (response) => {
+        tokenClient!.callback = (response) => {
             clearTimeout(timeoutId);
             if (response.error) {
                 console.error('Sign in error:', response.error);
@@ -128,19 +135,46 @@ export function signInWithGoogle(): Promise<boolean> {
             }
         };
 
-        // Check if we have a stored token
-        const storedToken = localStorage.getItem('gdrive_token');
-        if (storedToken) {
-            clearTimeout(timeoutId);
-            accessToken = storedToken;
-            gapi.client.setToken({ access_token: storedToken });
-            resolve(true);
-            return;
-        }
-
-        // Request a new token
-        tokenClient.requestAccessToken({ prompt: 'consent' });
+        // Always request through the consent popup. This is the final
+        // synchronous statement so user activation is preserved.
+        tokenClient!.requestAccessToken({ prompt: 'consent' });
     });
+}
+
+/**
+ * Silently resume a stored session on app load.
+ *
+ * Validates a stored token against the userinfo endpoint and NEVER opens a
+ * popup. On a 401 (expired/revoked) it clears the stored token and resets
+ * state so the UI reverts to the sign-in button.
+ */
+export async function resumeStoredSession(): Promise<boolean> {
+    const storedToken = localStorage.getItem('gdrive_token');
+    if (!storedToken) {
+        return false;
+    }
+
+    accessToken = storedToken;
+    gapi.client.setToken({ access_token: storedToken });
+
+    try {
+        const response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+            headers: {
+                Authorization: `Bearer ${storedToken}`,
+            },
+        });
+        if (!response.ok) {
+            // Token expired or revoked - clear it, do NOT open a popup on load
+            localStorage.removeItem('gdrive_token');
+            accessToken = null;
+            gapi.client.setToken(null);
+            return false;
+        }
+        return true;
+    } catch (error) {
+        console.error('Failed to resume stored session:', error);
+        return false;
+    }
 }
 
 /**
@@ -191,7 +225,7 @@ export function signOutFromGoogle(): void {
  * Check if user is signed in (and token is potentially valid)
  */
 export function isSignedIn(): boolean {
-    return !!accessToken || !!localStorage.getItem('gdrive_token');
+    return !!accessToken;
 }
 
 /**

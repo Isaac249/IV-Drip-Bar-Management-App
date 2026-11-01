@@ -72,9 +72,9 @@ export default function App() {
         // This runs after a short delay to let Google APIs initialize
         setTimeout(async () => {
           try {
-            const { isSignedIn, smartMergeAndSync } = await import('./utils/googleDrive');
+            const { resumeStoredSession, smartMergeAndSync } = await import('./utils/googleDrive');
 
-            if (isSignedIn()) {
+            if (await resumeStoredSession()) {
               // Use smart merge: cloud as base + add new local items
               const mergeResult = await smartMergeAndSync(localData || {});
 
