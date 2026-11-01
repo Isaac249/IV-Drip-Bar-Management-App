@@ -44,6 +44,9 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
   const [exportingKey, setExportingKey] = useState<string | null>(null);
   const [isCloudConnected, setIsCloudConnected] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // In-flight guard for cloud backup loads (React state is stale inside the
+  // interval closure, so use a ref to prevent overlapping reloads).
+  const isLoadingCloudRef = useRef(false);
 
   // Load backup list on mount and poll for cloud connection
   useEffect(() => {
@@ -58,6 +61,10 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
         if (connected) {
           loadCloudBackupList();
         }
+      } else if (connected && !isLoadingCloudRef.current) {
+        // Already connected: periodically refresh to pick up newly-written
+        // snapshots from auto-sync/connect, skipping if a load is in flight.
+        loadCloudBackupList();
       }
     }, 3000);
 
@@ -86,6 +93,7 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
   };
 
   const loadCloudBackupList = async () => {
+    isLoadingCloudRef.current = true;
     setIsLoadingCloudBackups(true);
     try {
       const backups = await listCloudBackups();
@@ -97,6 +105,7 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
       console.error('Failed to load cloud backups:', error);
     } finally {
       setIsLoadingCloudBackups(false);
+      isLoadingCloudRef.current = false;
     }
   };
 

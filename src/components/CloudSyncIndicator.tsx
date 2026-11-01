@@ -116,10 +116,16 @@ export function CloudSyncIndicator({ appData, onLoadFromCloud }: CloudSyncIndica
                 } else {
                     toast.success(`Terhubung sebagai ${email}`);
                 }
+
+                // Create a timestamped snapshot on connect (self-gated "pola hemat")
+                await smartCloudBackup(appData);
             } else {
                 // No cloud data, upload local
                 await saveToGoogleDrive(appData);
                 toast.success(`Terhubung sebagai ${email}`);
+
+                // Create a timestamped snapshot on connect (self-gated "pola hemat")
+                await smartCloudBackup(appData);
             }
         } catch (error) {
             console.error('Google sign in failed:', error);

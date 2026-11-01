@@ -302,19 +302,32 @@ async function getOrCreateAppFolder(): Promise<string | null> {
 }
 
 /**
- * Find data file in app folder
+ * Find the canonical data file ROBUSTLY.
+ *
+ * Because the app uses the `drive.file` scope it can only see files it created,
+ * so we query for ALL non-trashed files named `iv-drip-bar-data.json` WITHOUT a
+ * parent restriction. Older builds created duplicate data files outside the app
+ * folder; restricting to a single parent made save/load never find them and keep
+ * POSTing new duplicates. When multiple files are returned we treat the most
+ * recently modified one as canonical so save/load/last-sync all agree.
  */
-async function findDataFile(folderId: string): Promise<string | null> {
+async function findCanonicalDataFile(): Promise<string | null> {
     try {
         const response = await gapi.client.drive.files.list({
-            q: `name='${DATA_FILE_NAME}' and '${folderId}' in parents and trashed=false`,
+            q: `name='${DATA_FILE_NAME}' and trashed=false`,
             spaces: 'drive',
-            fields: 'files(id, name, modifiedTime)',
+            fields: 'files(id, name, modifiedTime, parents)',
         });
 
         const files = response.result.files;
         if (files && files.length > 0) {
-            return files[0].id || null;
+            // Pick the most recently modified file as canonical.
+            const sorted = [...files].sort((a, b) => {
+                const timeA = a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0;
+                const timeB = b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0;
+                return timeB - timeA;
+            });
+            return sorted[0].id || null;
         }
         return null;
     } catch (error) {
@@ -345,7 +358,7 @@ export async function saveToGoogleDrive<T>(data: T): Promise<boolean> {
             return false;
         }
 
-        const fileId = await findDataFile(folderId);
+        const fileId = await findCanonicalDataFile();
         const content = JSON.stringify(data, null, 2);
         const blob = new Blob([content], { type: 'application/json' });
 
@@ -405,10 +418,7 @@ export async function loadFromGoogleDrive<T>(): Promise<T | null> {
     }
 
     try {
-        const folderId = await getOrCreateAppFolder();
-        if (!folderId) return null;
-
-        const fileId = await findDataFile(folderId);
+        const fileId = await findCanonicalDataFile();
         if (!fileId) return null; // File truly doesn't exist, safe to return null
 
         const response = await fetch(
@@ -450,18 +460,25 @@ export async function getLastSyncTime(): Promise<Date | null> {
     }
 
     try {
-        const folderId = await getOrCreateAppFolder();
-        if (!folderId) return null;
-
+        // Use the same no-parent query as findCanonicalDataFile so the reported
+        // last-sync time reflects the SAME canonical file that save/load use.
         const response = await gapi.client.drive.files.list({
-            q: `name='${DATA_FILE_NAME}' and '${folderId}' in parents and trashed=false`,
+            q: `name='${DATA_FILE_NAME}' and trashed=false`,
             spaces: 'drive',
             fields: 'files(id, modifiedTime)',
         });
 
         const files = response.result.files;
-        if (files && files.length > 0 && files[0].modifiedTime) {
-            return new Date(files[0].modifiedTime);
+        if (files && files.length > 0) {
+            // Pick the most recently modified file (the canonical one).
+            const sorted = [...files].sort((a, b) => {
+                const timeA = a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0;
+                const timeB = b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0;
+                return timeB - timeA;
+            });
+            if (sorted[0].modifiedTime) {
+                return new Date(sorted[0].modifiedTime);
+            }
         }
         return null;
     } catch (error) {
