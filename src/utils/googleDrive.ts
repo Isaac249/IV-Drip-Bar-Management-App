@@ -308,8 +308,16 @@ async function getOrCreateAppFolder(): Promise<string | null> {
  * so we query for ALL non-trashed files named `iv-drip-bar-data.json` WITHOUT a
  * parent restriction. Older builds created duplicate data files outside the app
  * folder; restricting to a single parent made save/load never find them and keep
- * POSTing new duplicates. When multiple files are returned we treat the most
- * recently modified one as canonical so save/load/last-sync all agree.
+ * POSTing new duplicates.
+ *
+ * CRITICAL (data-loss guard): when multiple files are returned we must NOT just
+ * pick the most recently modified one — a stale duplicate can have a newer
+ * modifiedTime yet far fewer records, and choosing it would overwrite current
+ * data on the next sync. Instead we download each candidate and pick the one
+ * with the most DATA (patients + transactions + inventory), tie-breaking by most
+ * recent modifiedTime. Download/parse failures score -1 so they are never
+ * preferred; if EVERY candidate fails to download we fall back to the most
+ * recently modified file rather than returning null.
  */
 async function findCanonicalDataFile(): Promise<string | null> {
     try {
@@ -320,8 +328,53 @@ async function findCanonicalDataFile(): Promise<string | null> {
         });
 
         const files = response.result.files;
-        if (files && files.length > 0) {
-            // Pick the most recently modified file as canonical.
+        if (!files || files.length === 0) {
+            return null;
+        }
+        if (files.length === 1) {
+            return files[0].id || null;
+        }
+
+        // Multiple candidates (old duplicates). Choose by data richness so we
+        // never overwrite the richest copy with a stale-but-newer duplicate.
+        console.warn(`findCanonicalDataFile: ${files.length} candidate data files found; selecting by data richness.`);
+
+        const scored = await Promise.all(files.map(async (file) => {
+            const modified = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
+            if (!file.id) {
+                return { id: null as string | null, richness: -1, modified };
+            }
+            try {
+                const dl = await fetch(
+                    `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${accessToken}`,
+                        },
+                    }
+                );
+                if (!dl.ok) {
+                    return { id: file.id, richness: -1, modified };
+                }
+                const data = await dl.json() as {
+                    patients?: unknown[];
+                    transactions?: unknown[];
+                    inventory?: unknown[];
+                };
+                const richness =
+                    (data.patients?.length || 0) +
+                    (data.transactions?.length || 0) +
+                    (data.inventory?.length || 0);
+                return { id: file.id, richness, modified };
+            } catch (error) {
+                console.warn(`findCanonicalDataFile: failed to inspect candidate ${file.id}:`, error);
+                return { id: file.id, richness: -1, modified };
+            }
+        }));
+
+        // If every candidate failed to download/parse, fall back to the most
+        // recently modified file (previous behavior) rather than returning null.
+        if (scored.every(s => s.richness < 0)) {
             const sorted = [...files].sort((a, b) => {
                 const timeA = a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0;
                 const timeB = b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0;
@@ -329,7 +382,13 @@ async function findCanonicalDataFile(): Promise<string | null> {
             });
             return sorted[0].id || null;
         }
-        return null;
+
+        // Highest richness wins; tiebreak by most recent modifiedTime.
+        scored.sort((a, b) => {
+            if (b.richness !== a.richness) return b.richness - a.richness;
+            return b.modified - a.modified;
+        });
+        return scored[0].id || null;
     } catch (error) {
         console.error('Failed to find data file:', error);
         return null;
@@ -460,27 +519,30 @@ export async function getLastSyncTime(): Promise<Date | null> {
     }
 
     try {
-        // Use the same no-parent query as findCanonicalDataFile so the reported
-        // last-sync time reflects the SAME canonical file that save/load use.
-        const response = await gapi.client.drive.files.list({
-            q: `name='${DATA_FILE_NAME}' and trashed=false`,
-            spaces: 'drive',
-            fields: 'files(id, modifiedTime)',
-        });
+        // Resolve the SAME canonical file that save/load use (richness-based),
+        // then read its modifiedTime so last-sync agrees with the data file.
+        const fileId = await findCanonicalDataFile();
+        if (!fileId) return null;
 
-        const files = response.result.files;
-        if (files && files.length > 0) {
-            // Pick the most recently modified file (the canonical one).
-            const sorted = [...files].sort((a, b) => {
-                const timeA = a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0;
-                const timeB = b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0;
-                return timeB - timeA;
-            });
-            if (sorted[0].modifiedTime) {
-                return new Date(sorted[0].modifiedTime);
+        const response = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${fileId}?fields=modifiedTime`,
+            {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                },
             }
+        );
+
+        if (!response.ok) {
+            if (response.status === 401) {
+                localStorage.removeItem('gdrive_token');
+                accessToken = null;
+            }
+            return null;
         }
-        return null;
+
+        const result = await response.json() as { modifiedTime?: string };
+        return result.modifiedTime ? new Date(result.modifiedTime) : null;
     } catch (error) {
         console.error('Failed to get last sync time:', error);
         return null;

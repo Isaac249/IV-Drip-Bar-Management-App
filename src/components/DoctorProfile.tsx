@@ -47,6 +47,9 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
   // In-flight guard for cloud backup loads (React state is stale inside the
   // interval closure, so use a ref to prevent overlapping reloads).
   const isLoadingCloudRef = useRef(false);
+  // Timestamp of the last cloud-list load, used to throttle the background
+  // refresh so the 3s connection poll does not reload the list every tick.
+  const lastCloudListLoadRef = useRef(0);
 
   // Load backup list on mount and poll for cloud connection
   useEffect(() => {
@@ -60,11 +63,17 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
         setIsCloudConnected(connected);
         if (connected) {
           loadCloudBackupList();
+          lastCloudListLoadRef.current = Date.now();
         }
-      } else if (connected && !isLoadingCloudRef.current) {
-        // Already connected: periodically refresh to pick up newly-written
-        // snapshots from auto-sync/connect, skipping if a load is in flight.
-        loadCloudBackupList();
+      } else if (
+        connected &&
+        !isLoadingCloudRef.current &&
+        Date.now() - lastCloudListLoadRef.current >= 30000
+      ) {
+        // Already connected: refresh at most every ~30s to pick up newly-written
+        // snapshots, silently so the background poll never flips the spinner.
+        loadCloudBackupList(true);
+        lastCloudListLoadRef.current = Date.now();
       }
     }, 3000);
 
@@ -89,12 +98,13 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
     setIsCloudConnected(connected);
     if (connected) {
       await loadCloudBackupList();
+      lastCloudListLoadRef.current = Date.now();
     }
   };
 
-  const loadCloudBackupList = async () => {
+  const loadCloudBackupList = async (silent = false) => {
     isLoadingCloudRef.current = true;
-    setIsLoadingCloudBackups(true);
+    if (!silent) setIsLoadingCloudBackups(true);
     try {
       const backups = await listCloudBackups();
       setCloudBackups(backups);
@@ -104,7 +114,7 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
     } catch (error) {
       console.error('Failed to load cloud backups:', error);
     } finally {
-      setIsLoadingCloudBackups(false);
+      if (!silent) setIsLoadingCloudBackups(false);
       isLoadingCloudRef.current = false;
     }
   };
@@ -696,7 +706,7 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
                 </>
               )}
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={loadCloudBackupList} disabled={isLoadingCloudBackups || !isCloudConnected}>
+                <Button size="sm" variant="outline" onClick={() => loadCloudBackupList()} disabled={isLoadingCloudBackups || !isCloudConnected}>
                   <RefreshCw className={`w-4 h-4 mr-1 ${isLoadingCloudBackups ? 'animate-spin' : ''}`} />
                   Refresh
                 </Button>
