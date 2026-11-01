@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { DoctorProfile as DoctorProfileType } from '../types';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -6,9 +6,9 @@ import { Label } from './ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Textarea } from './ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { UserCircle, Building2, MapPin, FileText, Stethoscope, Phone, Mail, Download, AlertTriangle, RefreshCw, History, Clock, Calendar, Upload as CloudUpload } from 'lucide-react';
+import { UserCircle, Building2, MapPin, FileText, Stethoscope, Phone, Mail, Download, RefreshCw, History, Clock, Calendar, Upload as CloudUpload, FileUp } from 'lucide-react';
 import { toast } from 'sonner';
-import { dumpAllData, forceBackup, getAllBackups, loadBackupByKey, BackupInfo } from '../utils/db';
+import { forceBackup, getAllBackups, loadBackupByKey, BackupInfo } from '../utils/db';
 import { listCloudBackups, restoreFromCloudBackup, CloudBackupInfo, isSignedIn, createCloudBackup } from '../utils/googleDrive';
 import { AppData } from '../types';
 import { StorageIndicator } from './StorageIndicator';
@@ -32,7 +32,6 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
       email: ''
     }
   );
-  const [isRescuing, setIsRescuing] = useState(false);
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [hourlyBackups, setHourlyBackups] = useState<BackupInfo[]>([]);
   const [dailyBackups, setDailyBackups] = useState<BackupInfo[]>([]);
@@ -42,7 +41,9 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
   const [isLoadingBackups, setIsLoadingBackups] = useState(false);
   const [isLoadingCloudBackups, setIsLoadingCloudBackups] = useState(false);
   const [restoringKey, setRestoringKey] = useState<string | null>(null);
+  const [exportingKey, setExportingKey] = useState<string | null>(null);
   const [isCloudConnected, setIsCloudConnected] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load backup list on mount and poll for cloud connection
   useEffect(() => {
@@ -115,28 +116,90 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
-  const handleRescueData = async () => {
-    setIsRescuing(true);
+  const sanitizeForFilename = (s: string) => s.replace(/[:\\/\s]+/g, '-');
+
+  const exportBackupData = async (
+    exportKey: string,
+    baseName: string,
+    fetchData: () => Promise<AppData | null>
+  ) => {
+    setExportingKey(exportKey);
     try {
-      const allData = await dumpAllData();
-      const json = JSON.stringify(allData, null, 2);
+      const data = await fetchData();
+      if (!data) {
+        toast.error('Backup tidak ditemukan');
+        return;
+      }
+      const json = JSON.stringify(data, null, 2);
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `iv-drip-bar-RESCUE-${new Date().toISOString().split('T')[0]}.json`;
+      link.download = `iv-drip-bar-backup-${sanitizeForFilename(baseName)}.json`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
-      const keys = Object.keys(allData);
-      toast.success(`Rescued data with ${keys.length} entries`);
+      toast.success('Backup berhasil diekspor');
     } catch (error) {
-      console.error('Rescue failed:', error);
-      toast.error('Failed to rescue data from database');
+      console.error('Export backup failed:', error);
+      toast.error('Gagal mengekspor backup');
     } finally {
-      setIsRescuing(false);
+      setExportingKey(null);
+    }
+  };
+
+  const handleExportLocal = (backup: BackupInfo) =>
+    exportBackupData(backup.key, backup.label, () => loadBackupByKey(backup.key));
+
+  const handleExportCloud = (backup: CloudBackupInfo) =>
+    exportBackupData(
+      backup.id,
+      backup.name.replace(/^backup_(hourly|daily)_/, '').replace(/\.json$/, ''),
+      () => restoreFromCloudBackup<AppData>(backup.id)
+    );
+
+  const handleImportClick = () => fileInputRef.current?.click();
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+
+      if (typeof parsed !== 'object' || parsed === null) {
+        toast.error('File backup tidak valid');
+        e.target.value = '';
+        return;
+      }
+
+      const looksLikeBackup =
+        Array.isArray(parsed.patients) ||
+        Array.isArray(parsed.transactions) ||
+        Array.isArray(parsed.inventory);
+
+      if (!looksLikeBackup) {
+        if (!window.confirm('File ini mungkin bukan backup yang valid. Tetap impor?')) {
+          e.target.value = '';
+          return;
+        }
+      }
+
+      if (!window.confirm('Impor backup akan mengganti semua data aktif saat ini. Lanjutkan?')) {
+        e.target.value = '';
+        return;
+      }
+
+      onLoadBackup?.(parsed as AppData);
+      toast.success('Backup berhasil diimpor');
+    } catch (error) {
+      console.error('Import backup failed:', error);
+      toast.error('File backup tidak valid');
+    } finally {
+      e.target.value = '';
     }
   };
 
@@ -287,18 +350,33 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
             </p>
           </div>
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => handleRestoreBackup(backup.key, backup.label)}
-          disabled={restoringKey !== null || !onLoadBackup}
-        >
-          {restoringKey === backup.key ? (
-            <RefreshCw className="w-4 h-4 animate-spin" />
-          ) : (
-            'Restore'
-          )}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            title="Export"
+            onClick={() => handleExportLocal(backup)}
+            disabled={exportingKey !== null}
+          >
+            {exportingKey === backup.key ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => handleRestoreBackup(backup.key, backup.label)}
+            disabled={restoringKey !== null || !onLoadBackup}
+          >
+            {restoringKey === backup.key ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              'Restore'
+            )}
+          </Button>
+        </div>
       </div>
     ));
   };
@@ -473,7 +551,21 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
               <RefreshCw className={`w-4 h-4 mr-2 ${isLoadingBackups ? 'animate-spin' : ''}`} />
               Refresh Daftar
             </Button>
+            <Button
+              variant="outline"
+              onClick={handleImportClick}
+            >
+              <FileUp className="w-4 h-4 mr-2" />
+              Impor Backup
+            </Button>
           </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={handleImportFile}
+          />
 
           {/* Backup Tabs - 2 main tabs */}
           <Tabs defaultValue="local" className="w-full">
@@ -546,9 +638,14 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
                                 <p className="text-xs text-muted-foreground">{formatDate(backup.timestamp.toISOString())}</p>
                               </div>
                             </div>
-                            <Button size="sm" variant="outline" onClick={() => handleRestoreCloudBackup(backup)} disabled={restoringKey !== null}>
-                              {restoringKey === backup.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : 'Restore'}
-                            </Button>
+                            <div className="flex items-center gap-2">
+                              <Button size="sm" variant="outline" title="Export" onClick={() => handleExportCloud(backup)} disabled={exportingKey !== null}>
+                                {exportingKey === backup.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => handleRestoreCloudBackup(backup)} disabled={restoringKey !== null}>
+                                {restoringKey === backup.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : 'Restore'}
+                              </Button>
+                            </div>
                           </div>
                         ))
                       )}
@@ -574,9 +671,14 @@ export function DoctorProfile({ profile, onSaveProfile, onLoadBackup, appData }:
                                 <p className="text-xs text-muted-foreground">{formatDate(backup.timestamp.toISOString())}</p>
                               </div>
                             </div>
-                            <Button size="sm" variant="outline" onClick={() => handleRestoreCloudBackup(backup)} disabled={restoringKey !== null}>
-                              {restoringKey === backup.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : 'Restore'}
-                            </Button>
+                            <div className="flex items-center gap-2">
+                              <Button size="sm" variant="outline" title="Export" onClick={() => handleExportCloud(backup)} disabled={exportingKey !== null}>
+                                {exportingKey === backup.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => handleRestoreCloudBackup(backup)} disabled={restoringKey !== null}>
+                                {restoringKey === backup.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : 'Restore'}
+                              </Button>
+                            </div>
                           </div>
                         ))
                       )}
